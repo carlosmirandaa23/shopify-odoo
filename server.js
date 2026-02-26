@@ -25,14 +25,18 @@ function verifyShopifyWebhook(req) {
     .update(req.rawBody)
     .digest("base64");
 
-  return crypto.timingSafeEqual(
+  const valid = crypto.timingSafeEqual(
     Buffer.from(digest),
     Buffer.from(hmac)
   );
+
+  console.log("🔐 Webhook valid:", valid);
+  return valid;
 }
 
 // Función genérica para llamar Odoo
 async function odooCall(service, method, args) {
+  console.log(`📡 Llamando a Odoo: ${service}.${method} con args:`, args);
   const response = await fetch(ODOO_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -45,22 +49,32 @@ async function odooCall(service, method, args) {
   });
 
   const data = await response.json();
-  if (data.error) throw new Error(JSON.stringify(data.error));
+  if (data.error) {
+    console.error("❌ Error Odoo:", data.error);
+    throw new Error(JSON.stringify(data.error));
+  }
+  console.log("✅ Respuesta Odoo:", data.result);
   return data.result;
 }
 
 app.post("/shopify-webhook", async (req, res) => {
   try {
+    console.log("=== Nuevo webhook recibido ===");
+    console.log("Headers:", req.headers);
+    console.log("Body:", JSON.stringify(req.body, null, 2));
+
     // ✅ Validación primero
     if (!verifyShopifyWebhook(req)) {
+      console.log("❌ Webhook inválido");
       return res.status(401).send("Invalid webhook signature");
     }
 
-    // Ahora sí, tu lógica Odoo
     const order = req.body;
+    console.log("🛒 Procesando orden:", order.name);
 
     // 1️⃣ Login
     const uid = await odooCall("common", "login", [DB, USER, PASS]);
+    console.log("👤 UID de Odoo:", uid);
 
     // 2️⃣ Buscar cliente
     let partners = await odooCall("object", "execute_kw", [
@@ -70,10 +84,12 @@ app.post("/shopify-webhook", async (req, res) => {
       { limit: 1 }
     ]);
 
-    let partner_id;
+    console.log("📇 Clientes encontrados:", partners.length);
 
+    let partner_id;
     if (partners.length > 0) {
       partner_id = partners[0].id;
+      console.log("✅ Cliente existente ID:", partner_id);
     } else {
       partner_id = await odooCall("object", "execute_kw", [
         DB, uid, PASS,
@@ -84,13 +100,12 @@ app.post("/shopify-webhook", async (req, res) => {
           phone: order.phone || ""
         }]
       ]);
+      console.log("🆕 Cliente creado ID:", partner_id);
     }
 
     // 3️⃣ Construir líneas
     const order_lines = [];
-
     for (const item of order.line_items) {
-
       const products = await odooCall("object", "execute_kw", [
         DB, uid, PASS,
         "product.product", "search_read",
@@ -98,7 +113,10 @@ app.post("/shopify-webhook", async (req, res) => {
         { limit: 1 }
       ]);
 
-      if (products.length === 0) continue;
+      if (products.length === 0) {
+        console.log("⚠️ Producto no encontrado SKU:", item.sku);
+        continue;
+      }
 
       order_lines.push([
         0, 0, {
@@ -108,9 +126,11 @@ app.post("/shopify-webhook", async (req, res) => {
           name: item.title
         }
       ]);
+      console.log("➕ Línea agregada:", item.sku, item.quantity);
     }
 
     if (order_lines.length === 0) {
+      console.log("❌ Ningún producto válido encontrado");
       return res.status(400).json({ error: "No valid products found" });
     }
 
@@ -124,6 +144,7 @@ app.post("/shopify-webhook", async (req, res) => {
         order_line: order_lines
       }]
     ]);
+    console.log("🛒 Venta creada ID:", sale_id);
 
     // 5️⃣ Confirmar venta
     await odooCall("object", "execute_kw", [
@@ -131,11 +152,12 @@ app.post("/shopify-webhook", async (req, res) => {
       "sale.order", "action_confirm",
       [[sale_id]]
     ]);
+    console.log("✅ Venta confirmada ID:", sale_id);
 
     res.json({ success: true, sale_id });
 
   } catch (error) {
-    console.error(error);
+    console.error("❌ Error general:", error);
     res.status(500).json({ error: error.message });
   }
 });
