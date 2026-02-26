@@ -1,13 +1,35 @@
+const crypto = require("crypto");
 require("dotenv").config();
 const express = require("express");
 
 const app = express();
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 
 const ODOO_URL = process.env.ODOO_URL;
 const DB = process.env.DB;
 const USER = process.env.USER;
 const PASS = process.env.PASS;
+
+function verifyShopifyWebhook(req) {
+  const hmac = req.get("X-Shopify-Hmac-Sha256");
+  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(req.rawBody)
+    .digest("base64");
+
+  return crypto.timingSafeEqual(
+    Buffer.from(digest),
+    Buffer.from(hmac)
+  );
+}
 
 // Función genérica para llamar Odoo
 async function odooCall(service, method, args) {
@@ -29,6 +51,12 @@ async function odooCall(service, method, args) {
 
 app.post("/shopify-webhook", async (req, res) => {
   try {
+    // ✅ Validación primero
+    if (!verifyShopifyWebhook(req)) {
+      return res.status(401).send("Invalid webhook signature");
+    }
+
+    // Ahora sí, tu lógica Odoo
     const order = req.body;
 
     // 1️⃣ Login
