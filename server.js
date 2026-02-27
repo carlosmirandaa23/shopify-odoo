@@ -107,12 +107,27 @@ app.post("/shopify-webhook", async (req, res) => {
 // Webhook de Odoo (Cuando cambia el stock)
 app.post("/odoo-stock-webhook", async (req, res) => {
   try {
-    const { sku, new_qty } = req.body;
-    console.log(`📦 Notificación de Odoo: SKU ${sku} -> Cantidad ${new_qty}`);
+    // Odoo ahora manda 'product_id' y 'available_quantity' (o similar)
+    const { product_id, available_quantity, quantity } = req.body;
+    const final_qty = quantity || available_quantity;
 
-    if (sku && new_qty !== undefined) {
-      // No usamos await aquí para responder rápido a Odoo y evitar timeouts
-      updateShopifyStock(sku, new_qty);
+    console.log(`📡 Recibido de Odoo: ID Producto ${product_id} -> Cantidad ${final_qty}`);
+
+    if (product_id) {
+      // 1. Conectamos con Odoo para obtener el SKU (default_code)
+      const uid = await odooCall("common", "login", [DB, USER, PASS]);
+      const products = await odooCall("object", "execute_kw", [DB, uid, PASS, "product.product", "read", 
+        [[product_id]], { fields: ["default_code"] }
+      ]);
+
+      const sku = products[0]?.default_code;
+
+      if (sku) {
+        console.log(`📦 SKU encontrado: ${sku}. Sincronizando con Shopify...`);
+        updateShopifyStock(sku, final_qty);
+      } else {
+        console.log(`⚠️ El producto con ID ${product_id} no tiene una Referencia Interna (SKU).`);
+      }
     }
     res.status(200).send("OK");
   } catch (error) {
