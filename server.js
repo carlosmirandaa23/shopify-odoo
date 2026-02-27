@@ -141,10 +141,11 @@ async function updateShopifyStock(sku, qty) {
   try {
     const skuLimpio = sku.trim();
     
-    // 1. Buscamos la variante usando GraphQL (Mucho más preciso para SKUs con guiones/puntos)
+    // Usamos comillas dobles escapadas \" para que Shopify busque el SKU exacto
+    // Esto evita que los guiones y puntos rompan la lógica de búsqueda
     const query = `
       {
-        productVariants(first: 1, query: "sku:${skuLimpio}") {
+        productVariants(first: 1, query: "sku:\\"${skuLimpio}\\"") {
           edges {
             node {
               id
@@ -167,14 +168,19 @@ async function updateShopifyStock(sku, qty) {
     });
 
     const result = await response.json();
+    
+    // Si hay errores en la respuesta de Shopify, los vemos aquí
+    if (result.errors) {
+      console.error("❌ Error en la consulta GraphQL:", JSON.stringify(result.errors));
+    }
+
     const variant = result.data?.productVariants?.edges[0]?.node;
 
     if (variant) {
-      // Extraemos solo el ID numérico del Inventory Item
       const inventoryItemId = variant.inventoryItem.id.split('/').pop();
-      console.log(`🎯 Encontrado vía GraphQL! SKU: ${skuLimpio} (ID: ${inventoryItemId})`);
+      console.log(`🎯 ¡Encontrado! SKU: ${skuLimpio} -> ID Inventario: ${inventoryItemId}`);
 
-      // 2. Actualizamos el stock
+      // ... resto del código para hacer el fetch de inventory_levels/set.json ...
       const updateResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
         method: "POST",
         headers: {
@@ -189,16 +195,13 @@ async function updateShopifyStock(sku, qty) {
       });
 
       if (updateResponse.ok) {
-        console.log(`✅ Shopify sincronizado: ${skuLimpio} -> ${qty}`);
-      } else {
-        const errorData = await updateResponse.json();
-        console.error(`❌ Error al setear stock:`, JSON.stringify(errorData));
+        console.log(`✅ Sincronización exitosa en Shopify: ${skuLimpio} = ${qty}`);
       }
     } else {
-      console.log(`⚠️ SKU ${skuLimpio} NO encontrado ni con GraphQL. Verifica manualmente en Shopify.`);
+      console.log(`⚠️ Shopify no devolvió ninguna variante para el SKU: "${skuLimpio}" (incluso con seguimiento activo).`);
     }
   } catch (error) {
-    console.error(`❌ Error técnico en Shopify (${sku}):`, error);
+    console.error(`❌ Error técnico:`, error);
   }
 }
 
