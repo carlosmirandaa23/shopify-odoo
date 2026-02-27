@@ -36,27 +36,32 @@ async function odooCall(service, method, args) {
 
 async function updateShopifyStock(sku, qty) {
   try {
-    // 1. Buscar variante por SKU
-    const response = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/products.json?sku=${sku}`, {
+    // 1. Buscar variante por SKU (CORREGIDO)
+    // Usamos variants/search.json que es el endpoint correcto para filtrar por SKU
+    const response = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/variants/search.json?query=sku:${sku}`, {
       headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
     });
+    
     const data = await response.json();
-    const variant = data.products?.[0]?.variants.find(v => v.sku === sku);
+    const variant = data.variants?.[0]; // Tomamos la primera coincidencia
 
     if (variant) {
-      // 2. Actualizar stock
+      // 2. Actualizar stock (Se mantiene igual, pero ahora variant.inventory_item_id es seguro)
       await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
         method: "POST",
-        headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json" },
+        headers: { 
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, 
+          "Content-Type": "application/json" 
+        },
         body: JSON.stringify({
           location_id: SHOPIFY_LOCATION_ID,
           inventory_item_id: variant.inventory_item_id,
           available: Math.floor(qty)
         })
       });
-      console.log(`✅ Shopify sincronizado: ${sku} -> ${qty}`);
+      console.log(`✅ Shopify sincronizado (Master Odoo): ${sku} -> ${qty}`);
     } else {
-      console.log(`⚠️ SKU ${sku} no encontrado en Shopify`);
+      console.log(`⚠️ SKU ${sku} no encontrado en Shopify. Revisa que el SKU coincida exactamente.`);
     }
   } catch (error) {
     console.error("❌ Error actualizando Shopify:", error);
@@ -93,7 +98,7 @@ app.post("/shopify-webhook", async (req, res) => {
     }
 
     res.json({ success: true });
-  } catch (error) {
+  } catch (error) {up
     console.error("❌ Error procesando orden:", error);
     res.status(500).json({ error: error.message });
   }
