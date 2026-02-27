@@ -107,24 +107,24 @@ app.post("/shopify-webhook", async (req, res) => {
 // Webhook de Odoo (Cuando cambia el stock)
 app.post("/odoo-stock-webhook", async (req, res) => {
   try {
-    // Odoo ahora manda 'product_id' y 'available_quantity' (o similar)
     const { product_id, available_quantity, quantity } = req.body;
     const final_qty = quantity || available_quantity;
 
     console.log(`📡 Recibido de Odoo: ID Producto ${product_id} -> Cantidad ${final_qty}`);
 
     if (product_id) {
-      // 1. Conectamos con Odoo para obtener el SKU (default_code)
       const uid = await odooCall("common", "login", [DB, USER, PASS]);
       const products = await odooCall("object", "execute_kw", [DB, uid, PASS, "product.product", "read", 
         [[product_id]], { fields: ["default_code"] }
       ]);
 
-      const sku = products[0]?.default_code;
+      // Aplicamos .trim() para limpiar espacios accidentales
+      const sku = products[0]?.default_code?.trim();
 
       if (sku) {
-        console.log(`📦 SKU encontrado: ${sku}. Sincronizando con Shopify...`);
-        updateShopifyStock(sku, final_qty);
+        console.log(`📦 SKU encontrado: |${sku}|. Sincronizando con Shopify...`);
+        // Usamos await para asegurar que la función termine o lance error
+        await updateShopifyStock(sku, final_qty);
       } else {
         console.log(`⚠️ El producto con ID ${product_id} no tiene una Referencia Interna (SKU).`);
       }
@@ -135,6 +135,52 @@ app.post("/odoo-stock-webhook", async (req, res) => {
     res.status(500).send("Error");
   }
 });
+
+// Función de actualización mejorada para SKUs complejos
+async function updateShopifyStock(sku, qty) {
+  try {
+    // 1. Buscamos el Inventory Item usando el SKU codificado
+    // encodeURIComponent convierte los "." y "-" en caracteres seguros para la URL
+    const searchUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_items.json?sku=${encodeURIComponent(sku)}`;
+    
+    const response = await fetch(searchUrl, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
+    });
+    
+    const data = await response.json();
+    const inventoryItem = data.inventory_items?.[0];
+
+    if (inventoryItem) {
+      console.log(`🎯 Item encontrado en Shopify para SKU: ${sku} (ID: ${inventoryItem.id})`);
+
+      // 2. Ajustamos el stock en la ubicación configurada
+      const updateUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`;
+      const updateResponse = await fetch(updateUrl, {
+        method: "POST",
+        headers: { 
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, 
+          "Content-Type": "application/json" 
+        },
+        body: JSON.stringify({
+          location_id: SHOPIFY_LOCATION_ID,
+          inventory_item_id: inventoryItem.id,
+          available: Math.floor(qty) // Shopify no acepta decimales en stock
+        })
+      });
+
+      if (updateResponse.ok) {
+        console.log(`✅ Shopify sincronizado con éxito: ${sku} -> ${qty}`);
+      } else {
+        const errorData = await updateResponse.json();
+        console.error(`❌ Error al setear stock en Shopify:`, JSON.stringify(errorData));
+      }
+    } else {
+      console.log(`⚠️ SKU ${sku} no encontrado en Shopify. Verifica que el campo SKU en la variante sea idéntico.`);
+    }
+  } catch (error) {
+    console.error(`❌ Error técnico actualizando Shopify para SKU ${sku}:`, error);
+  }
+}
 
 // --- EL SERVIDOR SIEMPRE ESCUCHA AL FINAL ---
 const PORT = process.env.PORT || 3000;
