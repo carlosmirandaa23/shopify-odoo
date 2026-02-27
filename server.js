@@ -139,46 +139,66 @@ app.post("/odoo-stock-webhook", async (req, res) => {
 // Función de actualización mejorada para SKUs complejos
 async function updateShopifyStock(sku, qty) {
   try {
-    // 1. Buscamos el Inventory Item usando el SKU codificado
-    // encodeURIComponent convierte los "." y "-" en caracteres seguros para la URL
-    const searchUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_items.json?sku=${encodeURIComponent(sku)}`;
+    const skuLimpio = sku.trim();
     
-    const response = await fetch(searchUrl, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
+    // 1. Buscamos la variante usando GraphQL (Mucho más preciso para SKUs con guiones/puntos)
+    const query = `
+      {
+        productVariants(first: 1, query: "sku:${skuLimpio}") {
+          edges {
+            node {
+              id
+              inventoryItem {
+                id
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+      },
+      body: JSON.stringify({ query })
     });
-    
-    const data = await response.json();
-    const inventoryItem = data.inventory_items?.[0];
 
-    if (inventoryItem) {
-      console.log(`🎯 Item encontrado en Shopify para SKU: ${sku} (ID: ${inventoryItem.id})`);
+    const result = await response.json();
+    const variant = result.data?.productVariants?.edges[0]?.node;
 
-      // 2. Ajustamos el stock en la ubicación configurada
-      const updateUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`;
-      const updateResponse = await fetch(updateUrl, {
+    if (variant) {
+      // Extraemos solo el ID numérico del Inventory Item
+      const inventoryItemId = variant.inventoryItem.id.split('/').pop();
+      console.log(`🎯 Encontrado vía GraphQL! SKU: ${skuLimpio} (ID: ${inventoryItemId})`);
+
+      // 2. Actualizamos el stock
+      const updateResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
         method: "POST",
-        headers: { 
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, 
-          "Content-Type": "application/json" 
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           location_id: SHOPIFY_LOCATION_ID,
-          inventory_item_id: inventoryItem.id,
-          available: Math.floor(qty) // Shopify no acepta decimales en stock
+          inventory_item_id: inventoryItemId,
+          available: Math.floor(qty)
         })
       });
 
       if (updateResponse.ok) {
-        console.log(`✅ Shopify sincronizado con éxito: ${sku} -> ${qty}`);
+        console.log(`✅ Shopify sincronizado: ${skuLimpio} -> ${qty}`);
       } else {
         const errorData = await updateResponse.json();
-        console.error(`❌ Error al setear stock en Shopify:`, JSON.stringify(errorData));
+        console.error(`❌ Error al setear stock:`, JSON.stringify(errorData));
       }
     } else {
-      console.log(`⚠️ SKU ${sku} no encontrado en Shopify. Verifica que el campo SKU en la variante sea idéntico.`);
+      console.log(`⚠️ SKU ${skuLimpio} NO encontrado ni con GraphQL. Verifica manualmente en Shopify.`);
     }
   } catch (error) {
-    console.error(`❌ Error técnico actualizando Shopify para SKU ${sku}:`, error);
+    console.error(`❌ Error técnico en Shopify (${sku}):`, error);
   }
 }
 
