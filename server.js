@@ -139,69 +139,62 @@ app.post("/odoo-stock-webhook", async (req, res) => {
 // Función de actualización mejorada para SKUs complejos
 async function updateShopifyStock(sku, qty) {
   try {
-    const skuLimpio = sku.trim();
-    
-    // Usamos comillas dobles escapadas \" para que Shopify busque el SKU exacto
-    // Esto evita que los guiones y puntos rompan la lógica de búsqueda
-    const query = `
-      {
-        productVariants(first: 1, query: "sku:\\"${skuLimpio}\\"") {
-          edges {
-            node {
-              id
-              inventoryItem {
-                id
-              }
-            }
-          }
-        }
-      }
-    `;
+    // 1. Pedir el token usando las variables de entorno seguras
+    const authResponse = await fetch(`https://${process.env.SHOPIFY_STORE_URL}/admin/oauth/access_token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: process.env.SHOPIFY_CLIENT_ID, // <--- Variable de Render
+        client_secret: process.env.SHOPIFY_CLIENT_SECRET // <--- Variable de Render
+      })
+    });
 
-    const response = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/graphql.json`, {
+    const authData = await authResponse.json();
+    const tempToken = authData.access_token;
+
+    if (!tempToken) {
+      console.error("❌ Error de autenticación: Revisa el Client ID y Secret en Render.");
+      return;
+    }
+
+    // 2. Buscar la variante con el token obtenido
+    const query = `{ productVariants(first: 1, query: "sku:\\"${sku}\\"") { edges { node { id inventoryItem { id } } } } }`;
+    
+    const response = await fetch(`https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/graphql.json`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "X-Shopify-Access-Token": tempToken
       },
       body: JSON.stringify({ query })
     });
 
     const result = await response.json();
-    
-    // Si hay errores en la respuesta de Shopify, los vemos aquí
-    if (result.errors) {
-      console.error("❌ Error en la consulta GraphQL:", JSON.stringify(result.errors));
-    }
-
     const variant = result.data?.productVariants?.edges[0]?.node;
 
     if (variant) {
       const inventoryItemId = variant.inventoryItem.id.split('/').pop();
-      console.log(`🎯 ¡Encontrado! SKU: ${skuLimpio} -> ID Inventario: ${inventoryItemId}`);
-
-      // ... resto del código para hacer el fetch de inventory_levels/set.json ...
-      const updateResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
+      
+      // 3. Actualizar el nivel de inventario
+      await fetch(`https://${process.env.SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
         method: "POST",
         headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "X-Shopify-Access-Token": tempToken,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          location_id: SHOPIFY_LOCATION_ID,
+          location_id: process.env.SHOPIFY_LOCATION_ID,
           inventory_item_id: inventoryItemId,
           available: Math.floor(qty)
         })
       });
-
-      if (updateResponse.ok) {
-        console.log(`✅ Sincronización exitosa en Shopify: ${skuLimpio} = ${qty}`);
-      }
+      console.log(`✅ Sincronización exitosa: ${sku} ahora tiene ${qty} unidades.`);
     } else {
-      console.log(`⚠️ Shopify no devolvió ninguna variante para el SKU: "${skuLimpio}" (incluso con seguimiento activo).`);
+      console.log(`⚠️ No se encontró el SKU ${sku} en Shopify.`);
     }
   } catch (error) {
-    console.error(`❌ Error técnico:`, error);
+    console.error("❌ Error crítico en el proceso:", error);
   }
 }
 
