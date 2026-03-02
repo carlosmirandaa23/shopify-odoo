@@ -34,40 +34,6 @@ async function odooCall(service, method, args) {
   return data.result;
 }
 
-async function updateShopifyStock(sku, qty) {
-  try {
-    // 1. Buscar variante por SKU (CORREGIDO)
-    // Usamos variants/search.json que es el endpoint correcto para filtrar por SKU
-    const response = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/variants/search.json?query=sku:${sku}`, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
-    });
-    
-    const data = await response.json();
-    const variant = data.variants?.[0]; // Tomamos la primera coincidencia
-
-    if (variant) {
-      // 2. Actualizar stock (Se mantiene igual, pero ahora variant.inventory_item_id es seguro)
-      await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2024-01/inventory_levels/set.json`, {
-        method: "POST",
-        headers: { 
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, 
-          "Content-Type": "application/json" 
-        },
-        body: JSON.stringify({
-          location_id: SHOPIFY_LOCATION_ID,
-          inventory_item_id: variant.inventory_item_id,
-          available: Math.floor(qty)
-        })
-      });
-      console.log(`✅ Shopify sincronizado (Master Odoo): ${sku} -> ${qty}`);
-    } else {
-      console.log(`⚠️ SKU ${sku} no encontrado en Shopify. Revisa que el SKU coincida exactamente.`);
-    }
-  } catch (error) {
-    console.error("❌ Error actualizando Shopify:", error);
-  }
-}
-
 // --- RUTAS (ENDPOINTS) ---
 
 // Webhook de Shopify (Cuando entra una orden)
@@ -107,31 +73,42 @@ app.post("/shopify-webhook", async (req, res) => {
 // Webhook de Odoo (Cuando cambia el stock)
 app.post("/odoo-stock-webhook", async (req, res) => {
   try {
-    const { product_id, available_quantity, quantity } = req.body;
-    const final_qty = quantity || available_quantity;
+    const { product_id } = req.body;
 
-    console.log(`📡 Recibido de Odoo: ID Producto ${product_id} -> Cantidad ${final_qty}`);
+    if (!product_id) return res.status(400).send("No product_id provided");
 
-    if (product_id) {
-      const uid = await odooCall("common", "login", [DB, USER, PASS]);
-      const products = await odooCall("object", "execute_kw", [DB, uid, PASS, "product.product", "read", 
-        [[product_id]], { fields: ["default_code"] }
-      ]);
+    console.log(`📡 Evento de Odoo para ID: ${product_id}. Consultando stock real...`);
 
-      // Aplicamos .trim() para limpiar espacios accidentales
-      const sku = products[0]?.default_code?.trim();
+    const uid = await odooCall("common", "login", [DB, USER, PASS]);
 
-      if (sku) {
-        console.log(`📦 SKU encontrado: |${sku}|. Sincronizando con Shopify...`);
-        // Usamos await para asegurar que la función termine o lance error
-        await updateShopifyStock(sku, final_qty);
-      } else {
-        console.log(`⚠️ El producto con ID ${product_id} no tiene una Referencia Interna (SKU).`);
-      }
+    // 1. Consultamos el SKU Y el stock actualizado directamente de la DB de Odoo
+    // 'qty_available' es el stock físico real. 
+    // 'virtual_available' es el stock proyectado (físico - reservado).
+    const products = await odooCall("object", "execute_kw", [
+      DB, uid, PASS, 
+      "product.product", "read", 
+      [[product_id]], 
+      { fields: ["default_code", "qty_available"] } 
+    ]);
+
+    const product = products[0];
+    const sku = product?.default_code?.trim();
+    
+    // 2. Validación de seguridad para números negativos
+    // Si Odoo dice -5, nosotros enviamos 0 a Shopify.
+    let stockEnOdoo = product?.qty_available || 0;
+    const final_qty = Math.max(0, Math.floor(stockEnOdoo));
+
+    if (sku) {
+      console.log(`📦 Datos frescos de Odoo: SKU ${sku} | Stock: ${stockEnOdoo} -> Enviando a Shopify: ${final_qty}`);
+      await updateShopifyStock(sku, final_qty);
+    } else {
+      console.log(`⚠️ El producto ${product_id} no tiene SKU.`);
     }
+
     res.status(200).send("OK");
   } catch (error) {
-    console.error("❌ Error en webhook Odoo:", error);
+    console.error("❌ Error en la re-consulta a Odoo:", error);
     res.status(500).send("Error");
   }
 });
