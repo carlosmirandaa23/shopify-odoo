@@ -88,7 +88,7 @@ app.post("/odoo-stock-webhook", async (req, res) => {
       DB, uid, PASS, 
       "product.product", "read", 
       [[product_id]], 
-      { fields: ["default_code", "qty_available"] } 
+      { fields: ["default_code", "virtual_available"] } 
     ]);
 
     const product = products[0];
@@ -96,7 +96,7 @@ app.post("/odoo-stock-webhook", async (req, res) => {
     
     // 2. Validación de seguridad para números negativos
     // Si Odoo dice -5, nosotros enviamos 0 a Shopify.
-    let stockEnOdoo = product?.qty_available || 0;
+    let stockEnOdoo = product?.virtual_available || 0;
     const final_qty = Math.max(0, Math.floor(stockEnOdoo));
 
     if (sku) {
