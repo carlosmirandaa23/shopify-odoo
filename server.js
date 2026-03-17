@@ -406,6 +406,9 @@ app.post("/sync-now", async (req, res) => {
   syncAllStock();
 });
 
+// Health check para mantener viva la app
+app.get("/health", (req, res) => res.send("OK"));  // <-- aquí
+
 // ─────────────────────────────────────────
 // ARRANCAR SERVIDOR
 // ─────────────────────────────────────────
