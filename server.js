@@ -326,9 +326,9 @@ async function syncAllStock() {
   }
 }
 
-// Ejecutar inmediatamente al arrancar y luego cada 40 segundos
+// Ejecutar inmediatamente al arrancar y luego cada 4 minutos
 syncAllStock();
-setInterval(syncAllStock, 40 * 1000);
+setInterval(syncAllStock, 4 * 60 * 1000);
 
 // ─────────────────────────────────────────
 // RUTAS (ENDPOINTS)
