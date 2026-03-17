@@ -57,6 +57,16 @@ async function getShopifyToken() {
   return data.access_token;
 }
 
+// Devuelve el objeto completo de la variante: { barcode, sku, ... }
+async function getVariantData(token, variantId) {
+  const response = await fetch(
+    `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/variants/${variantId}.json`,
+    { headers: { "X-Shopify-Access-Token": token } }
+  );
+  const data = await response.json();
+  return data.variant || {};
+}
+
 // Obtiene TODAS las variantes de Shopify con barcode e inventoryItemId
 // Maneja paginación automática con cursores
 async function getAllShopifyVariants(token) {
@@ -129,16 +139,85 @@ async function setShopifyInventory(token, inventoryItemId, qty) {
   }
 }
 
-// Obtiene el barcode de una variante de Shopify a partir de su variant_id (REST)
-async function getBarcodeFromVariantId(token, variantId) {
-  const response = await fetch(
-    `https://${SHOPIFY_STORE_URL}/admin/api/2024-01/variants/${variantId}.json`,
-    {
-      headers: { "X-Shopify-Access-Token": token }
+// Busca un producto en Odoo con cadena de fallback:
+// 1. barcode del payload
+// 2. barcode consultando la variante en Shopify
+// 3. default_code con el SKU del payload
+// 4. default_code consultando la variante en Shopify
+async function findOdooProduct(uid, token, item) {
+  let variantCache = null; // para no consultar la variante dos veces
+
+  const fetchVariant = async () => {
+    if (!variantCache && item.variant_id) {
+      variantCache = await getVariantData(token, item.variant_id);
     }
-  );
-  const data = await response.json();
-  return data.variant?.barcode || null;
+    return variantCache || {};
+  };
+
+  // ── Intento 1: barcode directo del payload ──
+  const barcodeFromPayload = item.barcode?.trim();
+  if (barcodeFromPayload) {
+    const found = await odooCall("object", "execute_kw", [
+      DB, uid, PASS,
+      "product.product", "search_read",
+      [[["barcode", "=", barcodeFromPayload]]],
+      { limit: 1 }
+    ]);
+    if (found.length > 0) {
+      console.log(`  🔖 "${item.title}" encontrado por barcode del payload: ${barcodeFromPayload}`);
+      return found[0];
+    }
+  }
+
+  // ── Intento 2: barcode consultando la variante en Shopify ──
+  const variant = await fetchVariant();
+  const barcodeFromVariant = variant.barcode?.trim();
+  if (barcodeFromVariant && barcodeFromVariant !== barcodeFromPayload) {
+    const found = await odooCall("object", "execute_kw", [
+      DB, uid, PASS,
+      "product.product", "search_read",
+      [[["barcode", "=", barcodeFromVariant]]],
+      { limit: 1 }
+    ]);
+    if (found.length > 0) {
+      console.log(`  🔖 "${item.title}" encontrado por barcode de variante: ${barcodeFromVariant}`);
+      return found[0];
+    }
+  }
+
+  // ── Intento 3: SKU del payload contra default_code (referencia interna) ──
+  const skuFromPayload = item.sku?.trim();
+  if (skuFromPayload) {
+    const found = await odooCall("object", "execute_kw", [
+      DB, uid, PASS,
+      "product.product", "search_read",
+      [[["default_code", "=", skuFromPayload]]],
+      { limit: 1 }
+    ]);
+    if (found.length > 0) {
+      console.log(`  🔖 "${item.title}" encontrado por SKU del payload en default_code: ${skuFromPayload}`);
+      return found[0];
+    }
+  }
+
+  // ── Intento 4: SKU consultando la variante en Shopify contra default_code ──
+  const skuFromVariant = variant.sku?.trim();
+  if (skuFromVariant && skuFromVariant !== skuFromPayload) {
+    const found = await odooCall("object", "execute_kw", [
+      DB, uid, PASS,
+      "product.product", "search_read",
+      [[["default_code", "=", skuFromVariant]]],
+      { limit: 1 }
+    ]);
+    if (found.length > 0) {
+      console.log(`  🔖 "${item.title}" encontrado por SKU de variante en default_code: ${skuFromVariant}`);
+      return found[0];
+    }
+  }
+
+  // ── Sin resultado ──
+  console.warn(`  ⚠️  No se encontró "${item.title}" en Odoo por ningún método (barcode payload: ${barcodeFromPayload || "—"}, barcode variante: ${barcodeFromVariant || "—"}, SKU payload: ${skuFromPayload || "—"}, SKU variante: ${skuFromVariant || "—"})`);
+  return null;
 }
 
 // ─────────────────────────────────────────
@@ -150,13 +229,12 @@ async function syncAllStock() {
   const start = Date.now();
 
   try {
-    // Obtener token de Shopify y sesión de Odoo en paralelo
     const [token, uid] = await Promise.all([
       getShopifyToken(),
       odooCall("common", "login", [DB, USER, PASS])
     ]);
 
-    // 1. Traer todas las variantes de Shopify (con paginación automática)
+    // 1. Traer todas las variantes de Shopify con paginación automática
     const variants = await getAllShopifyVariants(token);
     console.log(`📋 [SYNC] ${variants.length} variantes con barcode encontradas en Shopify.`);
 
@@ -193,7 +271,6 @@ async function syncAllStock() {
       const rawStock = stockMap[variant.barcode];
 
       if (rawStock === undefined) {
-        // Barcode no existe en Odoo — no tocar el inventario
         skipped++;
         continue;
       }
@@ -237,8 +314,6 @@ app.post("/shopify-webhook", async (req, res) => {
 
     const order = req.body;
     const uid = await odooCall("common", "login", [DB, USER, PASS]);
-
-    // Obtener token para poder consultar barcodes si vienen vacíos
     const token = await getShopifyToken();
 
     // Buscar o crear cliente en Odoo
@@ -260,42 +335,20 @@ app.post("/shopify-webhook", async (req, res) => {
           }]
         ]);
 
-    // Construir líneas de orden usando barcode
+    // Construir líneas de orden con cadena de fallback completa
     const order_lines = [];
 
     for (const item of order.line_items) {
-      // Intentar obtener barcode directo del item
-      let barcode = item.barcode?.trim() || null;
+      const odooProduct = await findOdooProduct(uid, token, item);
 
-      // Fallback: consultar la variante por variant_id si el barcode viene vacío
-      if (!barcode && item.variant_id) {
-        console.log(`🔍 barcode vacío en item "${item.title}", consultando variante ${item.variant_id}...`);
-        barcode = await getBarcodeFromVariantId(token, item.variant_id);
-      }
+      if (!odooProduct) continue;
 
-      if (!barcode) {
-        console.warn(`⚠️  No se encontró barcode para "${item.title}" (variant_id: ${item.variant_id}). Saltando línea.`);
-        continue;
-      }
-
-      // Buscar producto en Odoo por barcode
-      const products = await odooCall("object", "execute_kw", [
-        DB, uid, PASS,
-        "product.product", "search_read",
-        [[["barcode", "=", barcode]]],
-        { limit: 1 }
-      ]);
-
-      if (products.length > 0) {
-        order_lines.push([0, 0, {
-          product_id: products[0].id,
-          product_uom_qty: item.quantity,
-          price_unit: parseFloat(item.price),
-          name: item.title
-        }]);
-      } else {
-        console.warn(`⚠️  Producto con barcode ${barcode} no encontrado en Odoo. Saltando línea.`);
-      }
+      order_lines.push([0, 0, {
+        product_id: odooProduct.id,
+        product_uom_qty: item.quantity,
+        price_unit: parseFloat(item.price),
+        name: item.title
+      }]);
     }
 
     if (order_lines.length > 0) {
@@ -321,7 +374,7 @@ app.post("/shopify-webhook", async (req, res) => {
   }
 });
 
-// Endpoint manual para forzar sincronización inmediata (útil para pruebas)
+// Endpoint manual para forzar sincronización inmediata
 app.post("/sync-now", async (req, res) => {
   res.json({ message: "Sincronización iniciada en background." });
   syncAllStock();
